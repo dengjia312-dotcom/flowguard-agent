@@ -1,0 +1,99 @@
+{
+  "app": {
+    "name": "FlowGuard Agent",
+    "version": "0.1.0",
+    "description": "Workflow-first AI Agent Runtime for multi-device task orchestration"
+  },
+  "providers": {
+    "openai_compatible": {
+      "baseUrl": "https://api.openai.com/v1",
+      "apiKeyEnvVar": "OPENAI_API_KEY"
+    }
+  },
+  "models": {
+    "planner": {
+      "provider": "openai_compatible",
+      "model": "gpt-4o",
+      "temperature": 0.2,
+      "maxTokens": 4096,
+      "_note": "Main brain: understands tasks, decomposes steps, generates structured execution plans"
+    },
+    "vision": {
+      "provider": "openai_compatible",
+      "model": "gpt-4o",
+      "temperature": 0.2,
+      "maxTokens": 1024,
+      "_note": "TODO: v0.1 config reserved only — vision calls not implemented"
+    },
+    "imageGeneration": {
+      "provider": "openai_compatible",
+      "model": "dall-e-3",
+      "temperature": 1.0,
+      "maxTokens": 1024,
+      "_note": "TODO: v0.1 config reserved only — image generation calls not implemented"
+    },
+    "embedding": {
+      "provider": "openai_compatible",
+      "model": "text-embedding-3-small",
+      "_note": "TODO: v0.1 uses keyword search — embedding-based RAG not implemented"
+    }
+  },
+  "tools": {
+    "enabled": [
+      "file.read",
+      "file.write",
+      "file.list",
+      "device.get_state",
+      "device.set_state",
+      "rag.search",
+      "web.search"
+    ],
+    "disabled": [
+      "shell.exec"
+    ]
+  },
+  "workflow": {
+    "steps": [
+      "receive_user_task",
+      "load_config",
+      "load_current_state",
+      "call_planner",
+      "parse_plan_json",
+      "validate_plan",
+      "check_safety_rules",
+      "execute_low_risk_tools",
+      "write_execution_log",
+      "update_state",
+      "summarize_result"
+    ]
+  },
+  "safety": {
+    "require_confirmation": [
+      "door_lock:unlock",
+      "camera:off",
+      "camera:disabled",
+      "file.delete",
+      "web.post",
+      "shell.exec",
+      "email.send",
+      "payment.process",
+      "content.publish"
+    ],
+    "forbidden_tools": [
+      "shell.exec"
+    ],
+    "rules": [
+      "Models can only generate plans, they cannot bypass the Runtime to execute actions",
+      "If a tool does not return success, the final answer must NOT claim the task is completed",
+      "All tool calls must be logged with tool_name, args, result, status, timestamp"
+    ]
+  },
+  "runtime": {
+    "plannerMode": "mock"
+  },
+  "paths": {
+    "workspace": "./workspace",
+    "state": "./data/state.json",
+    "execution_log": "./data/execution_log.json"
+  }
+}
