@@ -26,12 +26,22 @@ class OpenAICompatibleAdapter(BaseProviderAdapter):
 
     def __init__(self, base_url: str, api_key_env_var: str) -> None:
         self.base_url = base_url.rstrip("/")
-        self.api_key = os.environ.get(api_key_env_var)
-        if not self.api_key:
-            raise ValueError(
-                f"API key not set. Expected environment variable: '{api_key_env_var}'. "
-                f"Copy .env.example to .env and fill in your key."
-            )
+        self._api_key_env_var = api_key_env_var
+        # Lazy: key is read on first call, not at startup.
+        # This allows the service to start in mock mode without an API key.
+        self._api_key: str = ""
+
+    def _resolve_api_key(self) -> str:
+        """Read API key from env on first actual call. Raises with error code prefix."""
+        if not self._api_key:
+            key = os.environ.get(self._api_key_env_var, "")
+            if not key:
+                raise ValueError(
+                    f"api_key_missing: environment variable '{self._api_key_env_var}' is not set. "
+                    f"Copy .env.example to .env and fill in your key."
+                )
+            self._api_key = key
+        return self._api_key
 
     def get_provider_name(self) -> str:
         return "openai_compatible"
@@ -46,7 +56,7 @@ class OpenAICompatibleAdapter(BaseProviderAdapter):
     ) -> str:
         url = f"{self.base_url}/chat/completions"
         headers = {
-            "Authorization": f"Bearer {self.api_key}",
+            "Authorization": f"Bearer {self._resolve_api_key()}",
             "Content-Type": "application/json",
         }
         payload: Dict[str, Any] = {

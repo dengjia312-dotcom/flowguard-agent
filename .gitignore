@@ -12,9 +12,13 @@ __pycache__/
 # Environment variables (contains API keys)
 .env
 
-# IDE
+# IDE & tools
 .vscode/
 .idea/
+.claude/
+
+# Test cache
+.pytest_cache/
 
 # OS
 .DS_Store

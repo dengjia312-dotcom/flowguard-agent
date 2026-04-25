@@ -1,4 +1,4 @@
-# FlowGuard Agent v0.1.0
+# FlowGuard Agent v0.2.0
 
 **Workflow-first AI Agent Runtime for multi-device task orchestration and conflict handling.**
 
@@ -6,7 +6,7 @@
 
 ## 项目简介
 
-FlowGuard Agent 是一个执行型 AI Agent 框架，核心理念是 **workflow-first**：  
+FlowGuard Agent 是一个执行型 AI Agent 框架，核心理念是 **workflow-first**：
 Agent 不是聊天机器人，而是一个可校验、可确认、可追溯的任务执行引擎。
 
 它面向「多设备 / 多系统任务编排与冲突处理」场景，验证 AI Agent 如何将自然语言目标转化为结构化执行流程。
@@ -23,6 +23,83 @@ Agent 不是聊天机器人，而是一个可校验、可确认、可追溯的�
 | 多设备状态冲突 | 运行时检测冲突（窗开着开空调、安防开着解锁门），写入 conflicts 字段 |
 | 执行不可追溯 | 所有工具调用写入 `data/execution_log.json`（tool_name/args/result/status/timestamp）|
 | 模型强绑定 | 业务层只调用 `ModelRouter.call("planner", messages)`，不接触具体供应商 |
+| 模型输出不可靠 | Parser 支持普通 JSON、代码块包裹、双重转义、前后夹杂说明文字，解析失败则拒绝执行 |
+
+---
+
+## 快速启动
+
+```bash
+# 1. 克隆项目
+git clone <repo-url>
+cd flowguard-agent
+
+# 2. 创建虚拟环境
+python -m venv .venv
+
+# Windows:
+.venv\Scripts\activate
+# macOS/Linux:
+source .venv/bin/activate
+
+# 3. 安装依赖
+pip install -r requirements.txt
+
+# 4. 配置环境变量（仅 model 模式需要）
+cp .env.example .env
+# 编辑 .env，填入 MODEL_API_KEY=your-api-key-here
+
+# 5. 启动服务（默认 mock 模式，无需 API Key）
+uvicorn backend.main:app --reload --port 8000
+
+# 6. 打开交互式文档
+# http://localhost:8000/docs
+
+# 7. 运行单元测试
+pytest tests/ -v
+```
+
+---
+
+## 两种 Planner 模式
+
+| 模式 | 配置 | 说明 |
+|------|------|------|
+| **mock** | `"plannerMode": "mock"` | 默认。基于关键词匹配返回固定计划，无需 API Key |
+| **model** | `"plannerMode": "model"` | 调用真实 LLM 生成计划，需要 `.env` 中配置 `MODEL_API_KEY` |
+
+切换模式只需修改 `agent.config.json` 中 `runtime.plannerMode` 的值。
+
+**切换到 model 模式：**
+
+1. 在 `.env` 中填入 `MODEL_API_KEY=your-real-key`
+2. 在 `agent.config.json` 中修改供应商和模型：
+
+```json
+"providers": {
+  "openai_compatible": {
+    "baseUrl": "https://api.openai.com/v1",
+    "apiKeyEnvVar": "MODEL_API_KEY"
+  }
+},
+"models": {
+  "planner": {
+    "model": "gpt-4o"
+  }
+},
+"runtime": {
+  "plannerMode": "model"
+}
+```
+
+常用供应商：
+
+| 供应商 | baseUrl | model 示例 |
+|--------|---------|-----------|
+| OpenAI | `https://api.openai.com/v1` | `gpt-4o` |
+| DeepSeek | `https://api.deepseek.com/v1` | `deepseek-chat` |
+| SiliconFlow | `https://api.siliconflow.cn/v1` | `Qwen/Qwen2.5-72B-Instruct` |
+| OpenRouter | `https://openrouter.ai/api/v1` | `openai/gpt-4o` |
 
 ---
 
@@ -37,259 +114,137 @@ flowguard-agent/
 │   ├── model_router.py      # 模型角色路由（业务层唯一调用点）
 │   ├── providers/
 │   │   ├── base.py          # BaseProviderAdapter 抽象接口
-│   │   └── openai_compatible.py  # OpenAI-compatible 实现
+│   │   └── openai_compatible.py  # OpenAI-compatible 实现（懒加载 API Key）
 │   ├── tools/
 │   │   ├── file_tools.py    # file.read / file.write / file.list
 │   │   ├── device_tools.py  # device.get_state / device.set_state
-│   │   ├── rag_tools.py     # rag.search（v0.1: 关键词检索）
-│   │   └── web_tools.py     # web.search（v0.1: mock）
+│   │   ├── rag_tools.py     # rag.search（关键词检索）
+│   │   └── web_tools.py     # web.search（mock）
 │   ├── state/
 │   │   ├── state_manager.py # 任务状态管理 → data/state.json
 │   │   └── log_manager.py   # 执行日志管理 → data/execution_log.json
 │   └── schemas/
 │       ├── plan_schema.py   # ExecutionPlan / PlanStep
 │       └── tool_schema.py   # ToolCallRecord
+├── tests/
+│   └── test_parse_plan_json.py  # Parser 和字段规范化单元测试
 ├── workspace/
 │   ├── device_state.json    # 设备状态数据源
-│   └── test.md              # 测试文档（验收用例 2）
+│   └── test.md              # 测试文档
 ├── data/
 │   ├── state.json           # 任务状态持久化
 │   └── execution_log.json   # 执行日志（append-only）
+├── docs/
+│   ├── testing-guide.md     # Swagger 测试操作手册
+│   └── demo-script.md       # 面试/作品集演示脚本
 ├── agent.config.json        # 主配置文件
 ├── .env.example             # 环境变量模板
+├── .gitignore
 ├── requirements.txt
 └── README.md
 ```
 
 ---
 
-## 安装依赖
+## API 接口
 
-```bash
-# 进入项目目录
-cd flowguard-agent
-
-# 创建虚拟环境（推荐）
-python -m venv .venv
-
-# 激活虚拟环境
-# Windows:
-.venv\Scripts\activate
-# macOS/Linux:
-source .venv/bin/activate
-
-# 安装依赖
-pip install -r requirements.txt
-```
-
----
-
-## 配置 .env
-
-```bash
-# 复制模板
-cp .env.example .env
-
-# 编辑 .env，填入你的 API Key
-OPENAI_API_KEY=sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-```
-
----
-
-## 配置 agent.config.json
-
-关键字段说明：
-
-```json
-{
-  "providers": {
-    "openai_compatible": {
-      "baseUrl": "https://api.openai.com/v1",   // 修改为其他兼容供应商的 URL
-      "apiKeyEnvVar": "OPENAI_API_KEY"           // 对应 .env 中的变量名
-    }
-  },
-  "models": {
-    "planner": {
-      "provider": "openai_compatible",
-      "model": "gpt-4o",                         // 修改为任意支持的模型名
-      "temperature": 0.2,
-      "maxTokens": 4096
-    }
-  }
-}
-```
-
-**切换供应商示例（不改代码，只改配置）：**
-
-```json
-// 使用 DeepSeek（OpenAI-compatible）
-"providers": {
-  "openai_compatible": {
-    "baseUrl": "https://api.deepseek.com/v1",
-    "apiKeyEnvVar": "DEEPSEEK_API_KEY"
-  }
-},
-"models": {
-  "planner": {
-    "provider": "openai_compatible",
-    "model": "deepseek-chat"
-  }
-}
-```
-
-```json
-// 使用 硅基流动 SiliconFlow
-"providers": {
-  "openai_compatible": {
-    "baseUrl": "https://api.siliconflow.cn/v1",
-    "apiKeyEnvVar": "SILICONFLOW_API_KEY"
-  }
-},
-"models": {
-  "planner": {
-    "provider": "openai_compatible",
-    "model": "Qwen/Qwen2.5-72B-Instruct"
-  }
-}
-```
-
----
-
-## 启动命令
-
-```bash
-# 确保在 flowguard-agent/ 目录下运行
-cd flowguard-agent
-
-# 启动服务（开发模式，自动重载）
-uvicorn backend.main:app --reload --port 8000
-
-# 访问交互式文档
-http://localhost:8000/docs
-```
-
----
-
-## API 测试示例
-
-### 健康检查
-
-```bash
-curl http://localhost:8000/health
-```
-
-```json
-{"status": "ok", "service": "FlowGuard Agent", "version": "0.1.0"}
-```
-
-### 提交任务
-
-```bash
-curl -X POST http://localhost:8000/agent/run \
-  -H "Content-Type: application/json" \
-  -d '{"message": "帮我读取 test.md 并总结"}'
-```
-
-### 查看任务状态
-
-```bash
-curl http://localhost:8000/agent/state
-```
-
-### 查看执行日志
-
-```bash
-curl http://localhost:8000/agent/logs
-```
-
-### 确认高风险动作
-
-```bash
-# 先提交会触发确认的任务
-curl -X POST http://localhost:8000/agent/run \
-  -H "Content-Type: application/json" \
-  -d '{"message": "我快到家了，帮我开启回家模式"}'
-
-# 响应中获取 task_id，然后确认
-curl -X POST http://localhost:8000/agent/confirm \
-  -H "Content-Type: application/json" \
-  -d '{"task_id": "abc12345", "confirm": true}'
-
-# 或取消
-curl -X POST http://localhost:8000/agent/confirm \
-  -H "Content-Type: application/json" \
-  -d '{"task_id": "abc12345", "confirm": false}'
-```
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| `GET` | `/health` | 健康检查 |
+| `POST` | `/agent/run` | 提交任务（自然语言 → 计划 → 执行） |
+| `POST` | `/agent/confirm` | 确认或取消高风险动作 |
+| `GET` | `/agent/state` | 查看所有任务状态 |
+| `GET` | `/agent/logs` | 查看工具调用执行日志 |
 
 ---
 
 ## 验收用例
 
-### 用例 1：多设备任务编排（回家模式）
+### 用例 1：文件读取总结
 
-**输入：**
-```json
-POST /agent/run
-{"message": "我快到家了，帮我开启回家模式"}
+```bash
+curl -X POST http://localhost:8000/agent/run \
+  -H "Content-Type: application/json" \
+  -d '{"message": "读取 test.md"}'
 ```
 
-**期望行为：**
-1. Agent 读取 `workspace/device_state.json`
-2. Planner 生成包含多步骤的执行计划
-3. 低风险动作（开客厅灯、开空调、暂停扫地机器人）标记为可执行
-4. 解锁门锁（`door_lock` → `unlock`）被标记为 `requires_confirmation=true`
-5. 返回 `confirmation_required` 状态，列出 pending_actions
-6. 调用 `POST /agent/confirm` 确认后，所有步骤执行并写入 `execution_log.json`
+期望：`status: "completed"`，`file.read` 返回真实文件内容。
 
-**期望响应（含门锁时）：**
-```json
-{
-  "status": "confirmation_required",
-  "task_id": "abc12345",
-  "message": "检测到 1 个高风险动作，需要用户确认后才能执行",
-  "pending_actions": [
-    {
-      "step_id": "step_4",
-      "action": "device.set_state",
-      "args": {"device_id": "door_lock", "new_status": "unlock"},
-      "risk": "high",
-      "description": "解锁门锁"
-    }
-  ],
-  "safe_steps_preview": [...]
-}
+### 用例 2：多设备任务编排（回家模式）
+
+```bash
+curl -X POST http://localhost:8000/agent/run \
+  -H "Content-Type: application/json" \
+  -d '{"message": "回家模式"}'
 ```
 
-### 用例 2：文件读取总结
+期望：`status: "confirmation_required"`，`pending_actions` 中有 door_lock unlock。
 
-**输入：**
-```json
-POST /agent/run
-{"message": "帮我读取 test.md 并总结"}
+```bash
+curl -X POST http://localhost:8000/agent/confirm \
+  -H "Content-Type: application/json" \
+  -d '{"task_id": "<task_id>", "confirm": true}'
 ```
 
-**期望行为：**
-1. Planner 生成计划：`file.read` → 总结
-2. `file.read` 调用 `FileTools.read("test.md")` 读取真实文件内容
-3. 工具调用写入 `execution_log.json`（tool_name=file.read, status=success）
-4. 返回基于真实文件内容的总结
+期望：`status: "completed"`，5 步全部执行成功。
 
-**如果文件不存在：**
-```json
-{
-  "status": "failed",
-  "message": "无法完成任务：file.read 返回 status=failed",
-  "executed_actions": [
-    {
-      "tool": "file.read",
-      "status": "failed",
-      "result": {"status": "failed", "error": "File not found: nonexistent.md"}
-    }
-  ]
-}
+---
+
+## v0.1 验收结果
+
+以下接口测试均在 `plannerMode = "mock"` 模式下通过，无需 API Key。
+
+| 接口 | 测试场景 | 结果 |
+|------|----------|------|
+| `GET /health` | 服务在线检查 | 通过 |
+| `GET /agent/state` | 返回任务状态字典 | 通过 |
+| `GET /agent/logs` | 返回工具调用日志数组 | 通过 |
+| `POST /agent/run` | 文件读取总结 | 通过，`status: completed`，file.read 返回文件内容 |
+| `POST /agent/run` | 回家模式 | 通过，`status: confirmation_required`，door_lock 进入 pending_actions |
+| `POST /agent/confirm` | 确认执行 | 通过，5 步全部执行，door_lock → unlocked |
+| `POST /agent/confirm` | 拒绝执行 | 通过，`status: cancelled`，无动作执行 |
+
+---
+
+## v0.2 验收结果
+
+### mock planner 回归
+
+v0.1 所有测试在 v0.2 代码上回归通过，mock planner 行为不变。
+
+### model planner（真实模型）
+
+| 测试场景 | 结果 | 说明 |
+|----------|------|------|
+| file.read 读取 test.md | 通过 | 真实模型生成 `file.read` 计划，Runtime 执行后返回 `completed` |
+| 回家模式（高风险拦截） | 通过 | 模型生成含 door_lock unlock 的计划，Runtime 独立拦截为 `confirmation_required` |
+| confirm 后继续执行 | 通过 | 确认后 5 步全部执行，`completed` |
+| state/logs 追踪 | 通过 | `GET /agent/state` 和 `GET /agent/logs` 均记录完整执行链路 |
+
+### Parser 鲁棒性
+
+| 输入格式 | 结果 |
+|----------|------|
+| 普通 JSON | 通过 |
+| ` ```json ... ``` ` 代码块包裹 | 通过 |
+| 双重转义 JSON 字符串 | 通过 |
+| JSON 前后夹杂说明文字 | 通过 |
+| 纯文本（无法解析） | 返回 `plan_parse_failed`，不执行任何工具 |
+
+### 安全规则
+
+- door_lock unlock 始终被 Runtime `_check_safety` 独立拦截为 `confirmation_required`，不依赖模型标记
+- 未知 action 名返回 `plan_validation_failed`
+- 解析失败返回 `plan_parse_failed`，绝不执行工具
+
+### 单元测试
+
+```
+tests/test_parse_plan_json.py — 7 passed
 ```
 
-注意：文件不存在时，最终回答不能假装总结成功。
+详细操作步骤见 [docs/testing-guide.md](docs/testing-guide.md)。
+演示脚本见 [docs/demo-script.md](docs/demo-script.md)。
 
 ---
 
@@ -303,7 +258,7 @@ POST /agent/run
   "step_id": "step_1",
   "tool_name": "device.get_state",
   "args": {},
-  "result": {"status": "success", "devices": {...}},
+  "result": {"status": "success", "devices": {"...": "..."}},
   "status": "success",
   "timestamp": "2026-04-25T10:30:00.123456+00:00"
 }
@@ -311,59 +266,25 @@ POST /agent/run
 
 ---
 
-## v0.1 验收结果
-
-以下接口测试均在 `runtime.plannerMode = "mock"` 模式下通过，无需真实 API Key。
-
-| 接口 | 测试场景 | 结果 |
-|------|----------|------|
-| `GET /health` | 服务在线检查 | ✅ 通过 |
-| `GET /agent/state` | 返回任务状态字典 | ✅ 通过 |
-| `GET /agent/logs` | 返回工具调用日志数组 | ✅ 通过 |
-| `POST /agent/run` | 文件读取总结（`"读取 test.md"`） | ✅ 通过，`status: completed`，file.read 返回文件内容 |
-| `POST /agent/run` | 回家模式（`"回家模式"`） | ✅ 通过，`status: confirmation_required`，door_lock 进入 pending_actions |
-| `POST /agent/confirm` | 高风险确认（`confirm: true`） | ✅ 通过，5 步全部执行，door_lock 状态变为 unlocked |
-| `POST /agent/confirm` | 高风险拒绝（`confirm: false`） | ✅ 通过，`status: cancelled`，无任何动作执行 |
-
-**关键验收点：**
-- Runtime 11 步工作流完整跑通（plan → validate → safety → execute → log → state）
-- 高风险动作（door_lock unlock）被 Runtime 独立拦截，不依赖 Planner 标记
-- 每次工具调用均写入 execution_log.json，包含 tool_name / args / result / status / timestamp
-- 工具失败时，最终摘要不声称"已完成"（假完成防护有效）
-- mock planner 产生的计划与 live planner 走同一套校验和执行流程
-
-详细操作步骤见 [docs/testing-guide.md](docs/testing-guide.md)。
-
----
-
 ## 后续扩展方向
 
-### v0.2 — 模型与检索增强
-- [ ] `providers/deepseek.py` — DeepSeek 专属适配（流式输出）
-- [ ] `providers/gemini.py` — Google Gemini 适配
-- [ ] `providers/openrouter.py` — OpenRouter 多模型聚合
-- [ ] `providers/siliconflow.py` — 硅基流动国内模型
-- [ ] `rag_tools.py` — 升级为 embedding 向量检索（接通 embedding 模型角色）
-- [ ] `web_tools.py` — 接入真实搜索 API（Tavily / Bing / Brave）
-
-### v0.3 — 执行能力增强
-- [ ] `vision` 模型角色 — 实现图像理解（设备摄像头截图分析）
-- [ ] `imageGeneration` 模型角色 — 实现图像生成
-- [ ] `shell.exec` — 受限沙箱执行（白名单命令）
-- [ ] 步骤重试机制 — 失败步骤自动重试（可配置次数）
+### v0.3 — 检索与执行增强
+- [ ] RAG 升级为 embedding 向量检索
+- [ ] web.search 接入真实搜索 API
+- [ ] vision 模型角色 — 图像理解
+- [ ] 步骤重试机制（可配置次数）
 
 ### v0.4 — 可观测性
-- [ ] 结构化日志（JSON Lines 格式，支持 ELK / Loki）
-- [ ] Prometheus metrics 接口（任务成功率、延迟分位数）
+- [ ] 结构化日志（JSON Lines，支持 ELK / Loki）
+- [ ] Prometheus metrics 接口
 - [ ] WebSocket 实时推送执行进度
 
 ### v0.5 — 多 Agent
-- [ ] SubAgent 调度器 — 主脑拆分子任务给专属 Agent
+- [ ] SubAgent 调度器
 - [ ] Agent 间通信协议
-- [ ] 共享状态锁（防止多 Agent 冲突写入设备状态）
+- [ ] 共享状态锁
 
 ### v1.0 — 前端与部署
 - [ ] React 前端 — 任务提交、状态追踪、确认弹窗
 - [ ] Docker Compose 部署方案
 - [ ] 多用户认证（JWT）
-- [ ] 配置热重载（不重启服务修改 agent.config.json）

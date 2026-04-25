@@ -30,54 +30,71 @@ from .tools.rag_tools import RAGTools
 from .tools.web_tools import WebTools
 
 # ---------------------------------------------------------------------------
-# System prompt for the planner model
+# System prompt for the live planner model (plannerMode = "model")
 # ---------------------------------------------------------------------------
-SYSTEM_PROMPT = """You are FlowGuard Agent's Planner — a workflow-first AI responsible for task decomposition.
+PLANNER_SYSTEM_PROMPT = """\
+You are FlowGuard Agent's Planner. Your ONLY job is to convert a natural-language user goal \
+into a structured ExecutionPlan JSON object.
 
-Your ONLY output must be a single valid JSON object. No markdown fences, no explanation text, no extra keys.
+OUTPUT RULES — strictly enforced by the Runtime:
+1. Output MUST be a single valid JSON object. No markdown, no code fences, no explanation.
+2. You generate PLANS only. You cannot execute tools, cannot claim task completion.
+3. Use ONLY the exact action names listed below. Any other action name will be rejected.
+4. The Runtime independently enforces safety — but you must still flag high-risk steps correctly.
 
-You analyze the user's goal and the current device state, then produce a structured execution plan.
+AVAILABLE ACTIONS (copy exactly):
+  file.read          args: {"filename": "<string>"}
+  file.write         args: {"filename": "<string>", "content": "<string>"}
+  file.list          args: {}
+  device.get_state   args: {"device_id": "<optional string>"}
+  device.set_state   args: {"device_id": "<string>", "new_status": "<string>"}
+  rag.search         args: {"query": "<string>"}
+  web.search         args: {"query": "<string>"}
 
-CRITICAL RULES:
-1. You generate PLANS only. You do NOT execute anything.
-2. You MUST set requires_confirmation=true for: unlocking door_lock, disabling camera, any file deletion, any external write.
-3. If the user says "open the door" or "unlock", that is door_lock → unlock → requires_confirmation=true.
-4. Set risk="high" for any action involving door_lock, camera, or external writes.
-5. Detect conflicts between device states and list them in "conflicts".
-6. Always start by reading device state before setting it.
+RISK LEVELS:
+  low    — reads, lists, searches
+  medium — file writes, non-critical device changes
+  high   — door_lock unlock/open, camera off/disabled, file delete, external writes
 
-Available tools (use exactly these action names):
-  file.read       args: {"filename": "<string>"}
-  file.write      args: {"filename": "<string>", "content": "<string>"}
-  file.list       args: {}
-  device.get_state  args: {"device_id": "<optional string>"}
-  device.set_state  args: {"device_id": "<string>", "new_status": "<string>"}
-  rag.search      args: {"query": "<string>"}
-  web.search      args: {"query": "<string>"}
+SAFETY RULES (mandatory):
+- door_lock → unlocked/unlock/open  →  risk="high", requires_confirmation=true
+- camera    → off/disabled/stopped  →  risk="high", requires_confirmation=true
+- file.delete (any)                 →  risk="high", requires_confirmation=true
+- Always read device state before setting it when orchestrating devices.
 
-Risk levels:
-  low    — read operations, listing, searching
-  medium — writing files, non-critical device state changes
-  high   — door_lock unlock, camera off, file delete, external writes
+TASK TYPES:
+  device_orchestration — controlling smart home devices
+  file_summary         — reading/summarising files
+  rag_search           — knowledge base search
+  general              — other tasks
+  unknown              — cannot determine intent (return empty steps)
 
-Output format (JSON only, no other text):
+OUTPUT FORMAT (JSON only, no other text):
 {
-  "task_type": "device_orchestration|file_operation|rag_search|general",
-  "goal": "<restate the user's goal clearly>",
+  "task_type": "device_orchestration|file_summary|rag_search|general|unknown",
+  "goal": "<restate the user goal clearly in one sentence>",
   "steps": [
     {
       "id": "step_1",
-      "action": "<tool_name>",
+      "action": "<exact action name from the list above>",
       "args": {},
       "risk": "low|medium|high",
       "requires_confirmation": false,
-      "description": "<one-line description of this step>"
+      "description": "<one-line description>"
     }
   ],
-  "conflicts": ["<conflict description if any>"],
+  "conflicts": [],
   "need_user_confirmation": false
 }
 """
+
+# All action names the Runtime can dispatch. Used for plan validation.
+_KNOWN_ACTIONS: frozenset = frozenset({
+    "file.read", "file.write", "file.list",
+    "device.get_state", "device.set_state",
+    "rag.search", "web.search",
+    "shell.exec",   # known but disabled — blocked later in execute stage
+})
 
 
 class AgentRuntime:
@@ -132,12 +149,13 @@ class AgentRuntime:
             },
         )
 
-        # Step: call_planner  (mock or live)
+        # Step: call_planner  (mock or model)
         if self.planner_mode == "mock":
             plan_dict = self._mock_planner(message)
         else:
+            # plannerMode = "model" — call real LLM
             messages = [
-                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "system", "content": PLANNER_SYSTEM_PROMPT},
                 {
                     "role": "user",
                     "content": (
@@ -149,14 +167,25 @@ class AgentRuntime:
             ]
             try:
                 planner_response = await self.model_router.call("planner", messages)
-            except Exception as exc:
+            except ValueError as exc:
+                err = str(exc)
+                error_code = "api_key_missing" if "api_key_missing" in err else "model_call_failed"
                 self.state_manager.update_task_status(
-                    task_id, "failed", {"error": str(exc)}
+                    task_id, "failed", {"error_code": error_code, "detail": err}
                 )
                 return {
-                    "status": "error",
+                    "status": error_code,
                     "task_id": task_id,
-                    "message": f"Planner call failed: {exc}",
+                    "message": err,
+                }
+            except Exception as exc:
+                self.state_manager.update_task_status(
+                    task_id, "failed", {"error_code": "model_call_failed", "detail": str(exc)}
+                )
+                return {
+                    "status": "model_call_failed",
+                    "task_id": task_id,
+                    "message": f"Model API call failed: {exc}",
                 }
 
             # Step: parse_plan_json
@@ -165,24 +194,53 @@ class AgentRuntime:
                 self.state_manager.update_task_status(
                     task_id,
                     "failed",
-                    {"error": "Planner returned invalid JSON", "raw": planner_response},
+                    {"error_code": "plan_parse_failed", "raw": planner_response},
                 )
                 return {
-                    "status": "error",
+                    "status": "plan_parse_failed",
                     "task_id": task_id,
-                    "message": "Planner returned non-JSON output. Cannot execute.",
+                    "message": (
+                        "Model returned non-JSON output. "
+                        "Cannot execute. Check model or retry."
+                    ),
                     "raw_planner_response": planner_response,
                 }
 
-        # Step: validate_plan
+        # Step: validate_plan — Pydantic schema check
         try:
             plan = ExecutionPlan(**plan_dict)
         except Exception as exc:
+            self.state_manager.update_task_status(
+                task_id, "failed", {"error_code": "plan_validation_failed", "detail": str(exc)}
+            )
             return {
-                "status": "error",
+                "status": "plan_validation_failed",
                 "task_id": task_id,
                 "message": f"Plan schema validation failed: {exc}",
             }
+
+        # Step: validate_plan — unknown action check
+        unknown_actions = [
+            s.action for s in plan.steps if s.action not in _KNOWN_ACTIONS
+        ]
+        if unknown_actions:
+            self.state_manager.update_task_status(
+                task_id,
+                "failed",
+                {"error_code": "plan_validation_failed", "unknown_actions": unknown_actions},
+            )
+            return {
+                "status": "plan_validation_failed",
+                "task_id": task_id,
+                "message": (
+                    f"Plan contains unknown action(s): {unknown_actions}. "
+                    "Only registered tool names are allowed."
+                ),
+                "unknown_actions": unknown_actions,
+            }
+
+        # Step: normalize args — canonical field names before safety check & execution
+        self._normalize_step_args(plan)
 
         # Merge runtime-detected conflicts into plan
         if detected_conflicts:
@@ -366,23 +424,76 @@ class AgentRuntime:
         }
 
     def _parse_plan_json(self, response: str) -> Optional[Dict[str, Any]]:
-        """Extract JSON from planner response, tolerating markdown code fences."""
-        response = response.strip()
-        for pattern in [
-            r"```json\s*([\s\S]*?)\s*```",
-            r"```\s*([\s\S]*?)\s*```",
-            r"(\{[\s\S]*\})",
-        ]:
-            match = re.search(pattern, response)
-            if match:
+        """
+        Robustly extract a JSON dict from a planner response.
+
+        Degradation order:
+          1. Raw text — json.loads directly (happy path)
+          2. Double-encoded — if json.loads returns a string, parse again
+          3. Code fence stripped — ```json ... ``` or ``` ... ```
+          4. Prose-embedded — extract first {...} block from surrounding text
+
+        Never raises. Returns None only when all attempts fail.
+        """
+        text = response.strip()
+
+        def _try_parse(s: str) -> Optional[Dict[str, Any]]:
+            """Try to parse s as JSON dict, handling double-encoded strings."""
+            s = s.strip()
+            try:
+                result = json.loads(s)
+            except json.JSONDecodeError:
+                return None
+            if isinstance(result, dict):
+                return result
+            # Double-encoded: model returned a JSON-serialised string
+            # e.g. the raw text is "\"{ \\\"task_type\\\": ...}\""
+            if isinstance(result, str):
                 try:
-                    return json.loads(match.group(1))
+                    inner = json.loads(result)
+                    if isinstance(inner, dict):
+                        return inner
                 except json.JSONDecodeError:
-                    continue
-        try:
-            return json.loads(response)
-        except json.JSONDecodeError:
+                    pass
             return None
+
+        # 1. Happy path — model followed instructions and returned plain JSON
+        parsed = _try_parse(text)
+        if parsed is not None:
+            return parsed
+
+        # 2. Strip ```json ... ``` or ``` ... ``` code fences
+        for pattern in [r"```json\s*([\s\S]*?)\s*```", r"```\s*([\s\S]*?)\s*```"]:
+            m = re.search(pattern, text)
+            if m:
+                parsed = _try_parse(m.group(1))
+                if parsed is not None:
+                    return parsed
+
+        # 3. Extract first complete {...} block (handles prose before/after JSON)
+        m = re.search(r"(\{[\s\S]*\})", text)
+        if m:
+            parsed = _try_parse(m.group(1))
+            if parsed is not None:
+                return parsed
+
+        return None
+
+    def _normalize_step_args(self, plan: ExecutionPlan) -> None:
+        """
+        Normalize step args in-place to canonical field names before execution.
+
+        Canonical fields:
+          device.set_state : "status"   (live planner may produce "new_status")
+          file.read/write  : "filename" (mock planner may produce "path")
+        """
+        for step in plan.steps:
+            if step.action == "device.set_state":
+                if "new_status" in step.args and "status" not in step.args:
+                    step.args["status"] = step.args.pop("new_status")
+            if step.action in ("file.read", "file.write"):
+                if "path" in step.args and "filename" not in step.args:
+                    step.args["filename"] = step.args.pop("path")
 
     def _check_safety(self, plan: ExecutionPlan) -> List[PlanStep]:
         """

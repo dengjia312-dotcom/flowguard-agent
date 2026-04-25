@@ -1,21 +1,21 @@
 {
   "door_lock": {
-    "status": "unlocked",
+    "status": "locked",
     "room": "entrance",
     "riskLevel": "high",
-    "lastUpdated": "2026-04-25T08:08:55.006139+00:00"
+    "lastUpdated": "2026-04-25T00:00:00.000Z"
   },
   "air_conditioner": {
-    "status": "on",
+    "status": "off",
     "room": "living_room",
     "riskLevel": "low",
-    "lastUpdated": "2026-04-25T08:08:54.986375+00:00"
+    "lastUpdated": "2026-04-25T00:00:00.000Z"
   },
   "light": {
-    "status": "on",
+    "status": "off",
     "room": "living_room",
     "riskLevel": "low",
-    "lastUpdated": "2026-04-25T08:08:54.970280+00:00"
+    "lastUpdated": "2026-04-25T00:00:00.000Z"
   },
   "curtain": {
     "status": "closed",
@@ -30,10 +30,10 @@
     "lastUpdated": "2026-04-25T00:00:00.000Z"
   },
   "robot_vacuum": {
-    "status": "paused",
+    "status": "cleaning",
     "room": "living_room",
     "riskLevel": "low",
-    "lastUpdated": "2026-04-25T08:08:54.996065+00:00"
+    "lastUpdated": "2026-04-25T00:00:00.000Z"
   },
   "window": {
     "status": "closed",

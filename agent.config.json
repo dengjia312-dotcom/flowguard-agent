@@ -1,22 +1,23 @@
 {
   "app": {
     "name": "FlowGuard Agent",
-    "version": "0.1.0",
+    "version": "0.2.0",
     "description": "Workflow-first AI Agent Runtime for multi-device task orchestration"
   },
   "providers": {
     "openai_compatible": {
       "baseUrl": "https://api.openai.com/v1",
-      "apiKeyEnvVar": "OPENAI_API_KEY"
+      "apiKeyEnvVar": "MODEL_API_KEY",
+      "_note": "Change baseUrl + apiKeyEnvVar to switch providers. No code changes needed."
     }
   },
   "models": {
     "planner": {
       "provider": "openai_compatible",
       "model": "gpt-4o",
-      "temperature": 0.2,
-      "maxTokens": 4096,
-      "_note": "Main brain: understands tasks, decomposes steps, generates structured execution plans"
+      "temperature": 0.1,
+      "maxTokens": 2048,
+      "_note": "Used when runtime.plannerMode = 'model'. Change model name to match your provider."
     },
     "vision": {
       "provider": "openai_compatible",
