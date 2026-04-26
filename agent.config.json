@@ -95,6 +95,7 @@
   "paths": {
     "workspace": "./workspace",
     "state": "./data/state.json",
-    "execution_log": "./data/execution_log.json"
+    "execution_log": "./data/execution_log.json",
+    "events": "./data/events.json"
   }
 }

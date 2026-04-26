@@ -23,6 +23,7 @@ load_dotenv()
 
 from .config_loader import ConfigLoader
 from .agent_runtime import AgentRuntime
+from .events import EventBus
 
 # Resolve config path relative to project root (flowguard-agent/)
 _CONFIG_PATH = Path(__file__).parent.parent / "agent.config.json"
@@ -33,7 +34,11 @@ app = FastAPI(
     version="0.1.0",
     description="Workflow-first AI Agent Runtime for multi-device task orchestration",
 )
-runtime = AgentRuntime(config)
+
+event_bus = EventBus(
+    event_log_path=config.get("paths", {}).get("events", "./data/events.json")
+)
+runtime = AgentRuntime(config, event_bus=event_bus)
 
 
 # ---------------------------------------------------------------------------
@@ -101,3 +106,15 @@ async def agent_confirm(req: ConfirmRequest):
     confirm=false → cancel the task, no actions executed
     """
     return await runtime.confirm_task(req.task_id, req.confirm)
+
+
+@app.get("/agent/events")
+def agent_events():
+    """Return all multi-agent events from data/events.json."""
+    return {"events": event_bus.read_events()}
+
+
+@app.get("/agent/events/{task_id}")
+def agent_events_by_task(task_id: str):
+    """Return events for a specific task_id."""
+    return {"events": event_bus.read_events(task_id)}

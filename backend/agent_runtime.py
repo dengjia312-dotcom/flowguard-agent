@@ -20,6 +20,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
+from .events.event_bus import EventBus
 from .model_router import ModelRouter
 from .schemas.plan_schema import ExecutionPlan, PlanStep
 from .state.log_manager import LogManager
@@ -98,9 +99,14 @@ _KNOWN_ACTIONS: frozenset = frozenset({
 
 
 class AgentRuntime:
-    def __init__(self, config: Dict[str, Any]) -> None:
+    def __init__(
+        self,
+        config: Dict[str, Any],
+        event_bus: Optional[EventBus] = None,
+    ) -> None:
         self.config = config
         self.model_router = ModelRouter(config)
+        self.event_bus = event_bus
 
         runtime_cfg = config.get("runtime", {})
         self.planner_mode: str = runtime_cfg.get("plannerMode", "live")
@@ -122,6 +128,44 @@ class AgentRuntime:
         self.disabled_tools: set = set(tools_cfg.get("disabled", []))
 
     # ------------------------------------------------------------------
+    # Event emission helper
+    # ------------------------------------------------------------------
+
+    def _emit_event(
+        self,
+        task_id: str,
+        agent: str,
+        event_type: str,
+        status: str,
+        message: Optional[str] = None,
+        payload: Optional[Dict[str, Any]] = None,
+        step_id: Optional[str] = None,
+        tool_name: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Best-effort emit through self.event_bus. Never raises.
+
+        v0.3.0 only emits task.* and planner.* events from this method.
+        Reviewer / executor / reporter events are added in later iterations.
+        """
+        if not self.event_bus:
+            return None
+        try:
+            return self.event_bus.emit(
+                task_id=task_id,
+                agent=agent,
+                event_type=event_type,
+                status=status,
+                message=message,
+                payload=payload,
+                step_id=step_id,
+                tool_name=tool_name,
+            )
+        except Exception:
+            # Event bus failures must never break the runtime.
+            return None
+
+    # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
 
@@ -131,6 +175,16 @@ class AgentRuntime:
         Steps: receive_user_task → ... → summarize_result
         """
         task_id = str(uuid.uuid4())[:8]
+
+        # Event: task.received
+        self._emit_event(
+            task_id=task_id,
+            agent="system",
+            event_type="task.received",
+            status="pending",
+            message="Task received",
+            payload={"message": message},
+        )
 
         # Step: load_current_state
         device_result = self.device_tools.get_state()
@@ -147,6 +201,16 @@ class AgentRuntime:
                 "message": message,
                 "createdAt": datetime.now(timezone.utc).isoformat(),
             },
+        )
+
+        # Event: planner.started
+        self._emit_event(
+            task_id=task_id,
+            agent="planner",
+            event_type="planner.started",
+            status="running",
+            message="Planner started",
+            payload={"planner_mode": self.planner_mode},
         )
 
         # Step: call_planner  (mock or model)
@@ -173,6 +237,15 @@ class AgentRuntime:
                 self.state_manager.update_task_status(
                     task_id, "failed", {"error_code": error_code, "detail": err}
                 )
+                self._emit_event(
+                    task_id=task_id,
+                    agent="planner",
+                    event_type="planner.failed",
+                    status="failed",
+                    message=f"Planner failed: {error_code}",
+                    payload={"reason": error_code},
+                )
+                self._emit_task_failed(task_id, error_code)
                 return {
                     "status": error_code,
                     "task_id": task_id,
@@ -182,6 +255,15 @@ class AgentRuntime:
                 self.state_manager.update_task_status(
                     task_id, "failed", {"error_code": "model_call_failed", "detail": str(exc)}
                 )
+                self._emit_event(
+                    task_id=task_id,
+                    agent="planner",
+                    event_type="planner.failed",
+                    status="failed",
+                    message="Planner failed: model_call_failed",
+                    payload={"reason": "model_call_failed"},
+                )
+                self._emit_task_failed(task_id, "model_call_failed")
                 return {
                     "status": "model_call_failed",
                     "task_id": task_id,
@@ -196,6 +278,15 @@ class AgentRuntime:
                     "failed",
                     {"error_code": "plan_parse_failed", "raw": planner_response},
                 )
+                self._emit_event(
+                    task_id=task_id,
+                    agent="planner",
+                    event_type="planner.failed",
+                    status="failed",
+                    message="Planner failed: plan_parse_failed",
+                    payload={"reason": "plan_parse_failed"},
+                )
+                self._emit_task_failed(task_id, "plan_parse_failed")
                 return {
                     "status": "plan_parse_failed",
                     "task_id": task_id,
@@ -213,6 +304,15 @@ class AgentRuntime:
             self.state_manager.update_task_status(
                 task_id, "failed", {"error_code": "plan_validation_failed", "detail": str(exc)}
             )
+            self._emit_event(
+                task_id=task_id,
+                agent="planner",
+                event_type="planner.failed",
+                status="failed",
+                message="Planner failed: plan_validation_failed",
+                payload={"reason": "plan_validation_failed", "detail": str(exc)},
+            )
+            self._emit_task_failed(task_id, "plan_validation_failed")
             return {
                 "status": "plan_validation_failed",
                 "task_id": task_id,
@@ -229,6 +329,18 @@ class AgentRuntime:
                 "failed",
                 {"error_code": "plan_validation_failed", "unknown_actions": unknown_actions},
             )
+            self._emit_event(
+                task_id=task_id,
+                agent="planner",
+                event_type="planner.failed",
+                status="failed",
+                message="Planner failed: plan_validation_failed",
+                payload={
+                    "reason": "plan_validation_failed",
+                    "unknown_actions": unknown_actions,
+                },
+            )
+            self._emit_task_failed(task_id, "plan_validation_failed")
             return {
                 "status": "plan_validation_failed",
                 "task_id": task_id,
@@ -239,12 +351,37 @@ class AgentRuntime:
                 "unknown_actions": unknown_actions,
             }
 
+        # Event: planner.completed (plan parsed and validated successfully)
+        self._emit_event(
+            task_id=task_id,
+            agent="planner",
+            event_type="planner.completed",
+            status="success",
+            message="Planner generated a valid execution plan",
+            payload={
+                "planner_mode": self.planner_mode,
+                "task_type": plan.task_type,
+                "goal": plan.goal,
+                "steps_count": len(plan.steps),
+            },
+        )
+
         # Step: normalize args — canonical field names before safety check & execution
         self._normalize_step_args(plan)
 
         # Merge runtime-detected conflicts into plan
         if detected_conflicts:
             plan.conflicts = list(set(plan.conflicts + detected_conflicts))
+
+        # Event: safety.started
+        self._emit_event(
+            task_id=task_id,
+            agent="reviewer",
+            event_type="safety.started",
+            status="running",
+            message="Safety reviewer started",
+            payload={"steps_count": len(plan.steps)},
+        )
 
         # Step: check_safety_rules
         confirmation_steps = self._check_safety(plan)
@@ -271,6 +408,20 @@ class AgentRuntime:
                 for s in plan.steps
                 if not s.requires_confirmation
             ]
+
+            # Event: safety.flagged
+            self._emit_event(
+                task_id=task_id,
+                agent="reviewer",
+                event_type="safety.flagged",
+                status="waiting_confirmation",
+                message=f"Safety reviewer flagged {len(confirmation_steps)} high-risk step(s)",
+                payload={
+                    "pending_count": len(confirmation_steps),
+                    "pending_actions": pending_actions,
+                },
+            )
+
             self.state_manager.save_task(
                 task_id,
                 {
@@ -281,6 +432,17 @@ class AgentRuntime:
                     "createdAt": datetime.now(timezone.utc).isoformat(),
                 },
             )
+
+            # Event: confirmation.required
+            self._emit_event(
+                task_id=task_id,
+                agent="user",
+                event_type="confirmation.required",
+                status="waiting_confirmation",
+                message="User confirmation required",
+                payload={"pending_actions": pending_actions},
+            )
+
             return {
                 "status": "confirmation_required",
                 "task_id": task_id,
@@ -293,6 +455,16 @@ class AgentRuntime:
                 "conflicts": plan.conflicts,
             }
 
+        # Event: safety.passed
+        self._emit_event(
+            task_id=task_id,
+            agent="reviewer",
+            event_type="safety.passed",
+            status="success",
+            message="Safety reviewer passed all steps",
+            payload={"pending_count": 0},
+        )
+
         # Steps: execute_low_risk_tools → write_execution_log → update_state
         results = await self._execute_steps(task_id, plan.steps)
 
@@ -303,7 +475,7 @@ class AgentRuntime:
         )
 
         # Step: summarize_result
-        return self._build_summary(task_id, plan, results)
+        return self._finalize_task_result(task_id, plan, results)
 
     async def confirm_task(self, task_id: str, confirmed: bool) -> Dict[str, Any]:
         """Handle POST /agent/confirm"""
@@ -321,14 +493,41 @@ class AgentRuntime:
             }
 
         if not confirmed:
+            # Event: confirmation.cancelled
+            self._emit_event(
+                task_id=task_id,
+                agent="user",
+                event_type="confirmation.cancelled",
+                status="cancelled",
+                message="User rejected confirmation",
+                payload={"confirmed": False},
+            )
             self.state_manager.update_task_status(
                 task_id, "cancelled", {"reason": "User rejected confirmation"}
+            )
+            self._emit_event(
+                task_id=task_id,
+                agent="system",
+                event_type="task.cancelled",
+                status="cancelled",
+                message="Task cancelled",
+                payload={"final_status": "cancelled"},
             )
             return {
                 "status": "cancelled",
                 "task_id": task_id,
                 "message": "Task cancelled by user. No actions were executed.",
             }
+
+        # Event: confirmation.approved
+        self._emit_event(
+            task_id=task_id,
+            agent="user",
+            event_type="confirmation.approved",
+            status="success",
+            message="User approved confirmation",
+            payload={"confirmed": True},
+        )
 
         # Execute all steps (confirmation granted)
         plan = ExecutionPlan(**task["plan"])
@@ -338,11 +537,131 @@ class AgentRuntime:
         self.state_manager.update_task_status(
             task_id, "completed", {"results": results}
         )
-        return self._build_summary(task_id, plan, results)
+        return self._finalize_task_result(task_id, plan, results)
 
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    def _emit_task_failed(self, task_id: str, reason: str) -> None:
+        self._emit_event(
+            task_id=task_id,
+            agent="system",
+            event_type="task.failed",
+            status="failed",
+            message=f"Task failed: {reason}",
+            payload={
+                "reason": reason,
+                "final_status": "failed",
+            },
+        )
+
+    def _finalize_task_result(
+        self,
+        task_id: str,
+        plan: ExecutionPlan,
+        results: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        failed_count = len([r for r in results if r.get("status") == "failed"])
+        skipped_count = len([r for r in results if r.get("status") == "skipped"])
+
+        self._emit_event(
+            task_id=task_id,
+            agent="reporter",
+            event_type="reporter.started",
+            status="running",
+            message="Reporter started",
+            payload={
+                "executed_count": len(results),
+                "failed_count": failed_count,
+                "skipped_count": skipped_count,
+            },
+        )
+
+        summary = self._build_summary(task_id, plan, results)
+        counts = self._extract_summary_counts(summary)
+
+        self._emit_event(
+            task_id=task_id,
+            agent="reporter",
+            event_type="reporter.summary_created",
+            status="success",
+            message="Reporter created final summary",
+            payload=counts,
+        )
+        self._emit_task_final_event(task_id, summary, counts)
+        return summary
+
+    def _extract_summary_counts(self, result: Any) -> Dict[str, int]:
+        if isinstance(result, dict):
+            summary_obj = result.get("summary", {})
+        else:
+            summary_obj = getattr(result, "summary", {})
+
+        def _get(field: str) -> int:
+            if isinstance(summary_obj, dict):
+                return int(summary_obj.get(field, 0))
+            return int(getattr(summary_obj, field, 0))
+
+        return {
+            "total_steps": _get("total_steps"),
+            "successful": _get("successful"),
+            "failed": _get("failed"),
+            "pending_confirmation": _get("pending_confirmation"),
+            "skipped": _get("skipped"),
+        }
+
+    def _emit_task_final_event(
+        self,
+        task_id: str,
+        result: Dict[str, Any],
+        counts: Dict[str, int],
+    ) -> None:
+        final_status = result.get("status")
+        if final_status == "completed" and counts["failed"] == 0:
+            self._emit_event(
+                task_id=task_id,
+                agent="system",
+                event_type="task.completed",
+                status="success",
+                message="Task completed",
+                payload={
+                    "final_status": "completed",
+                    "successful": counts["successful"],
+                    "failed": 0,
+                },
+            )
+            return
+
+        if final_status == "completed_with_errors":
+            self._emit_event(
+                task_id=task_id,
+                agent="system",
+                event_type="task.completed_with_errors",
+                status="failed",
+                message="Task completed with errors",
+                payload={
+                    "final_status": "completed_with_errors",
+                    "successful": counts["successful"],
+                    "failed": counts["failed"],
+                },
+            )
+            return
+
+        if final_status == "failed":
+            self._emit_event(
+                task_id=task_id,
+                agent="system",
+                event_type="task.failed",
+                status="failed",
+                message="Task failed",
+                payload={
+                    "reason": "execution_failed",
+                    "final_status": "failed",
+                    "successful": counts["successful"],
+                    "failed": counts["failed"],
+                },
+            )
 
     def _mock_planner(self, message: str) -> Dict[str, Any]:
         """
@@ -535,12 +854,26 @@ class AgentRuntime:
         results: List[Dict[str, Any]] = []
 
         for step in steps:
+            self._emit_event(
+                task_id=task_id,
+                agent="executor",
+                event_type="executor.step_started",
+                status="running",
+                step_id=step.id,
+                tool_name=step.action,
+                payload={
+                    "args": dict(step.args),
+                    "risk": step.risk,
+                },
+            )
+
             # High-risk step not yet confirmed → log as pending, skip execution
             if step.requires_confirmation and not skip_confirmation_check:
                 record = self._make_log_record(
                     task_id, step, {"message": "Awaiting user confirmation"}, "pending_confirmation"
                 )
                 self.log_manager.append(record)
+                self._emit_executor_step_completed(task_id, step, record)
                 results.append(record)
                 continue
 
@@ -553,6 +886,7 @@ class AgentRuntime:
                     "skipped",
                 )
                 self.log_manager.append(record)
+                self._emit_executor_step_completed(task_id, step, record)
                 results.append(record)
                 continue
 
@@ -565,6 +899,7 @@ class AgentRuntime:
                     "failed",
                 )
                 self.log_manager.append(record)
+                self._emit_executor_step_completed(task_id, step, record)
                 results.append(record)
                 continue
 
@@ -578,9 +913,40 @@ class AgentRuntime:
 
             record = self._make_log_record(task_id, step, result, status)
             self.log_manager.append(record)
+            self._emit_executor_step_completed(task_id, step, record)
             results.append(record)
 
         return results
+
+    def _emit_executor_step_completed(
+        self,
+        task_id: str,
+        step: PlanStep,
+        record: Dict[str, Any],
+    ) -> None:
+        result = record.get("result")
+        result_status = result.get("status") if isinstance(result, dict) else None
+        error = result.get("error") if isinstance(result, dict) else None
+        event_status = {
+            "success": "success",
+            "failed": "failed",
+            "skipped": "skipped",
+            "pending_confirmation": "waiting_confirmation",
+        }.get(record.get("status"), "failed")
+
+        self._emit_event(
+            task_id=task_id,
+            agent="executor",
+            event_type="executor.step_completed",
+            status=event_status,
+            step_id=step.id,
+            tool_name=step.action,
+            payload={
+                "args": dict(step.args),
+                "result_status": result_status,
+                "error": error,
+            },
+        )
 
     async def _dispatch_tool(self, step: PlanStep) -> Dict[str, Any]:
         action = step.action
