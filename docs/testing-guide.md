@@ -1,6 +1,6 @@
-# FlowGuard Agent — Swagger 测试操作手册
+# FlowGuard Agent v0.3 测试指南
 
-本文档说明如何在 `http://localhost:8000/docs` 中完整测试所有接口，覆盖 mock 和 model 两种 planner 模式。
+本文档说明如何通过 Swagger 和 pytest 验证 FlowGuard Agent v0.3 的 workflow-first / multi-agent event runtime。
 
 ---
 
@@ -9,47 +9,48 @@
 ```bash
 cd flowguard-agent
 python -m venv .venv
-
-# Windows:
-.venv\Scripts\activate
-# macOS/Linux:
-source .venv/bin/activate
-
+.\.venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
----
+默认配置为 mock planner：
 
-## Part 1 — mock 模式测试（无需 API Key）
-
-确认 `agent.config.json` 中：
 ```json
-"runtime": { "plannerMode": "mock" }
+{
+  "runtime": {
+    "plannerMode": "mock"
+  }
+}
 ```
+
+mock 模式不需要 API Key。
 
 启动服务：
+
 ```bash
 uvicorn backend.main:app --reload --port 8000
-# 打开 http://localhost:8000/docs
 ```
 
-### 测试顺序
+打开 Swagger：
 
-1. 健康检查（确认服务在线）
-2. 文件读取总结（最简单路径，无确认）
-3. 查看 state（验证任务已记录）
-4. 查看 logs（验证工具调用已记录）
-5. 回家模式（触发高风险确认流程）
-6. 高风险确认（完成确认流程）
-7. 再次查看 logs（验证所有步骤已记录）
+```text
+http://localhost:8000/docs
+```
 
 ---
 
-### 1. GET /health — 健康检查
+## Swagger 测试流程
 
-点击 **Try it out** → **Execute**
+### 1. 健康检查
 
-**期望响应（200）：**
+接口：
+
+```text
+GET /health
+```
+
+期望：
+
 ```json
 {
   "status": "ok",
@@ -58,251 +59,265 @@ uvicorn backend.main:app --reload --port 8000
 }
 ```
 
+说明：当前 app version 仍来自配置文件，文档版本为 v0.3.0。
+
 ---
 
-### 2. POST /agent/run — 文件读取总结
+### 2. 读取 test.md
 
-Request body：
-```json
-{ "message": "读取 test.md" }
+接口：
+
+```text
+POST /agent/run
 ```
 
-**期望响应：**
-```json
-{
-  "status": "completed",
-  "task_id": "xxxxxxxx",
-  "goal": "读取并总结 test.md",
-  "summary": {
-    "total_steps": 1,
-    "successful": 1,
-    "failed": 0,
-    "pending_confirmation": 0,
-    "skipped": 0
-  },
-  "executed_actions": [
-    {
-      "step_id": "step_1",
-      "tool": "file.read",
-      "status": "success",
-      "result": {
-        "status": "success",
-        "filename": "test.md",
-        "content": "..."
-      }
-    }
-  ]
-}
-```
+Body：
 
-**验证点：**
-- `status` 为 `"completed"`
-- `result.content` 包含 test.md 的真实内容
-
----
-
-### 3. GET /agent/state — 查看任务状态
-
-**验证点：** 可以看到刚才的任务，`status` 为 `"completed"`
-
----
-
-### 4. GET /agent/logs — 查看执行日志
-
-**验证点：** 每条记录都有 `task_id / step_id / tool_name / args / result / status / timestamp`
-
----
-
-### 5. POST /agent/run — 回家模式（触发确认）
-
-```json
-{ "message": "回家模式" }
-```
-
-**记录响应中的 `task_id`（下一步需要用到）**
-
-**期望响应：**
 ```json
 {
-  "status": "confirmation_required",
-  "task_id": "yyyyyyyy",
-  "message": "检测到 1 个高风险动作...",
-  "pending_actions": [
-    {
-      "step_id": "step_5",
-      "action": "device.set_state",
-      "args": {"device_id": "door_lock", "status": "unlocked"},
-      "risk": "high"
-    }
-  ],
-  "safe_steps_preview": [...]
+  "message": "读取 test.md"
 }
 ```
 
-**验证点：**
-- `status` 为 `"confirmation_required"`
-- `pending_actions` 中有且仅有 door_lock unlock
-- 此时**任何动作都还未执行**
+期望：
+
+- 返回 `status: "completed"`
+- 返回 `task_id`
+- `executed_actions` 中有 `file.read`
+- summary 中 `successful == 1`
+
+随后调用：
+
+```text
+GET /agent/events/{task_id}
+```
+
+期望事件链包含：
+
+```text
+task.received
+planner.started
+planner.completed
+safety.started
+safety.passed
+executor.step_started
+executor.step_completed
+reporter.started
+reporter.summary_created
+task.completed
+```
 
 ---
 
-### 6. POST /agent/confirm — 确认高风险动作
+### 3. 回家模式：触发确认
 
-#### 6a. 确认执行
+接口：
 
-```json
-{ "task_id": "yyyyyyyy", "confirm": true }
+```text
+POST /agent/run
 ```
 
-**期望：** `status: "completed"`，全部 5 步 `success`
-
-#### 6b. 拒绝执行
-
-先重新提交"回家模式"获取新 task_id，然后：
-```json
-{ "task_id": "zzzzzzzz", "confirm": false }
-```
-
-**期望：** `status: "cancelled"`，`GET /agent/logs` 中无该 task_id 的记录
-
----
-
-### 7. 再次 GET /agent/logs
-
-**验证点：** 回家模式确认后的 5 条日志完整记录（device.get_state x1, device.set_state x4）
-
----
-
-## Part 2 — model 模式测试（需要 API Key）
-
-### 配置步骤
-
-**步骤 1：** 配置 `.env`
-
-```bash
-cp .env.example .env
-# 编辑 .env：
-# MODEL_API_KEY=your-api-key-here
-```
-
-**步骤 2：** 修改 `agent.config.json`
-
-根据你的供应商修改以下字段：
+Body：
 
 ```json
-"providers": {
-  "openai_compatible": {
-    "baseUrl": "https://api.openai.com/v1",
-    "apiKeyEnvVar": "MODEL_API_KEY"
-  }
-},
-"models": {
-  "planner": {
-    "provider": "openai_compatible",
-    "model": "gpt-4o",
-    "temperature": 0.1,
-    "maxTokens": 2048
-  }
-},
-"runtime": {
-  "plannerMode": "model"
+{
+  "message": "回家模式"
 }
 ```
 
-**常用供应商配置：**
+期望：
 
-| 供应商 | baseUrl | model 示例 |
-|--------|---------|-----------|
-| OpenAI | `https://api.openai.com/v1` | `gpt-4o` |
-| DeepSeek | `https://api.deepseek.com/v1` | `deepseek-chat` |
-| SiliconFlow | `https://api.siliconflow.cn/v1` | `Qwen/Qwen2.5-72B-Instruct` |
-| OpenRouter | `https://openrouter.ai/api/v1` | `openai/gpt-4o` |
+- 返回 `status: "confirmation_required"`
+- 返回 `task_id`
+- `pending_actions` 中包含 door_lock unlock
+- 此时不执行任何工具
 
-**步骤 3：** 重启服务
+查看事件：
 
-```bash
-uvicorn backend.main:app --reload --port 8000
+```text
+GET /agent/events/{task_id}
+```
+
+期望事件链包含：
+
+```text
+task.received
+planner.started
+planner.completed
+safety.started
+safety.flagged
+confirmation.required
+```
+
+此时不应出现：
+
+```text
+executor.step_started
+reporter.started
+task.completed
 ```
 
 ---
 
-### model 模式：测试文件读取
+### 4. confirm=true
+
+接口：
+
+```text
+POST /agent/confirm
+```
+
+Body：
 
 ```json
-{ "message": "帮我读取 test.md 并总结内容" }
+{
+  "task_id": "<task_id>",
+  "confirm": true
+}
 ```
 
-**期望：** 真实模型生成 `file.read` 步骤，Runtime 执行后返回 `status: "completed"`。
+期望：
 
-**说明：** model 模式下，模型可能使用 `filename` 或 `path` 作为参数名，Runtime 的 `_normalize_step_args` 会在执行前统一规范化为 `filename`。
+- 返回 `status: "completed"`
+- 多个 executor step 事件出现
+- door_lock unlock 对应 step 成功
+
+事件链新增：
+
+```text
+confirmation.approved
+executor.step_started
+executor.step_completed
+reporter.started
+reporter.summary_created
+task.completed
+```
 
 ---
 
-### model 模式：测试回家模式（高风险拦截）
+### 5. confirm=false
+
+重新提交一次“回家模式”，获取新的 `task_id`。
+
+接口：
+
+```text
+POST /agent/confirm
+```
+
+Body：
 
 ```json
-{ "message": "我快到家了，帮我开启回家模式" }
+{
+  "task_id": "<task_id>",
+  "confirm": false
+}
 ```
 
-**期望：** 模型生成含 door_lock unlock 的计划，Runtime 独立校验后返回 `status: "confirmation_required"`。
+期望：
 
-**安全验证：** 即使模型没有正确设置 `requires_confirmation: true`，Runtime 的 `_check_safety` 会独立检测到 door_lock unlock，强制进入确认流程。这是 workflow-first 的核心保障。
+- 返回 `status: "cancelled"`
+- 不出现 executor 事件
+- 不出现 reporter summary
+- 不出现 `task.completed`
 
-确认后用 `POST /agent/confirm` 完成执行。
+事件链新增：
 
----
-
-### 错误码排查
-
-| 返回的 status | 原因 | 解决方法 |
-|--------------|------|----------|
-| `api_key_missing` | `.env` 中没有设置 `MODEL_API_KEY` | 检查 `.env` 文件，确认 key 存在且非空 |
-| `model_call_failed` | 网络超时或 API 返回非 200 | 检查 baseUrl 是否正确；检查 key 是否有效；查看终端日志 |
-| `plan_parse_failed` | 模型输出了非 JSON 内容 | 尝试 temperature 调低到 0.1；换用 JSON 能力更强的模型 |
-| `plan_validation_failed` | 计划 JSON 缺少必填字段或包含未知 action | 查看返回的 `message` 和 `unknown_actions` 字段 |
-| `confirmation_required` | 计划包含高风险动作（正常行为） | 用 `POST /agent/confirm` 确认或取消 |
+```text
+confirmation.cancelled
+task.cancelled
+```
 
 ---
 
-## Part 3 — 单元测试
+## 事件接口
+
+### 查看全部事件
+
+```text
+GET /agent/events
+```
+
+返回：
+
+```json
+{
+  "events": []
+}
+```
+
+实际运行时会返回事件数组。文档不展示本地真实 `data/events.json` 内容。
+
+### 查看指定任务事件
+
+```text
+GET /agent/events/{task_id}
+```
+
+用于 dashboard / 调试工具按任务展示时间线。
+
+---
+
+## pytest
+
+推荐命令：
 
 ```bash
-cd flowguard-agent
-pytest tests/ -v
+.\.venv\Scripts\python.exe -m pytest tests/ -v
 ```
 
-**期望输出：**
-```
-tests/test_parse_plan_json.py::test_plain_json PASSED
-tests/test_parse_plan_json.py::test_json_code_fence PASSED
-tests/test_parse_plan_json.py::test_double_encoded_json PASSED
-tests/test_parse_plan_json.py::test_unparseable_returns_none PASSED
-tests/test_parse_plan_json.py::test_json_embedded_in_prose PASSED
-tests/test_parse_plan_json.py::test_normalize_new_status_to_status PASSED
-tests/test_parse_plan_json.py::test_normalize_path_to_filename PASSED
+v0.3.0 当前测试结果：
 
-7 passed
+```text
+53 passed
 ```
+
+测试覆盖：
+
+- `AgentEvent` schema
+- `EventLogManager`
+- `EventBus`
+- planner 事件
+- safety / confirmation 事件
+- executor 事件
+- reporter / task final 事件
+- planner JSON 解析和参数规范化
+
+---
+
+## model planner 测试
+
+如需测试真实模型：
+
+1. 在 `.env` 中配置环境变量
+2. 在 `agent.config.json` 中设置：
+
+```json
+{
+  "runtime": {
+    "plannerMode": "model"
+  }
+}
+```
+
+注意：
+
+- 不要把真实 API Key 写进文档或提交到 Git
+- model planner 只生成计划
+- Runtime 仍会独立做 schema validation、safety check 和 confirmation gate
 
 ---
 
 ## 常见问题
 
-**Q: POST /agent/run 返回 `status: "error"`，提示 Planner call failed**
+### 为什么回家模式第一次不会执行低风险步骤？
 
-检查 `agent.config.json`，确认 `plannerMode` 值为 `"mock"`：
-```json
-"runtime": { "plannerMode": "mock" }
-```
+当前设计是整体确认：一旦 plan 中含高风险步骤，Runtime 保存完整 plan 并返回 `confirmation_required`。确认前不执行任何工具，避免“部分执行后用户拒绝”的状态不一致。
 
-**Q: POST /agent/confirm 返回 Task not found**
+### 为什么事件里没有完整工具结果？
 
-task_id 已过期或输入有误。重新提交"回家模式"获取新的 task_id。
+Executor event 只保存摘要，完整工具结果保存在 `data/execution_log.json`。这样事件流更适合 dashboard 消费。
 
-**Q: POST /agent/confirm 返回 Task is not awaiting confirmation**
+### 为什么说 multi-agent，但没有多个 Agent 类？
 
-该任务已经被确认/取消过了。重新提交一次"回家模式"。
-
-**Q: file.read 返回 `status: "failed"`, error: "File not found"**
-
-确认 `workspace/test.md` 文件存在。从项目根目录运行 `uvicorn`（不是从 `backend/` 目录）。
+v0.3 是 multi-agent event runtime。Planner / Reviewer / Executor / Reporter 是逻辑角色，先通过事件协议稳定边界；v0.5 再考虑模块拆分。

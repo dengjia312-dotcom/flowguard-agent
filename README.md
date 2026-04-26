@@ -1,166 +1,99 @@
-# FlowGuard Agent v0.2.0
+# FlowGuard Agent v0.3.0
 
-**Workflow-first AI Agent Runtime for multi-device task orchestration and conflict handling.**
+**Workflow-first multi-agent event runtime for auditable task execution.**
 
----
+FlowGuard Agent 不是普通聊天机器人。它验证的是一种 workflow-first Agent 架构：模型只生成结构化计划，Runtime 负责校验、安全拦截、执行工具、记录日志和发出事件。v0.3.0 在 v0.2 执行引擎之上补齐了 Multi-Agent Event Runtime 后端闭环，为后续 dashboard 和像素办公室可视化打底。
 
-## 项目简介
-
-FlowGuard Agent 是一个执行型 AI Agent 框架，核心理念是 **workflow-first**：
-Agent 不是聊天机器人，而是一个可校验、可确认、可追溯的任务执行引擎。
-
-它面向「多设备 / 多系统任务编排与冲突处理」场景，验证 AI Agent 如何将自然语言目标转化为结构化执行流程。
+当前实现是“多角色 Agent Runtime”，不是多个独立模型并发协作。Planner / Safety Reviewer / Executor / Reporter 等角色现在是 Runtime 中的逻辑角色，并通过事件流暴露给前端和调试工具。
 
 ---
 
-## 项目解决的问题
+## 版本演进
 
-| 问题 | 解决方案 |
-|------|----------|
-| Agent 假完成 | 工具未返回 `status=success` 时，摘要不允许写"已完成" |
-| Agent 跳步 | 每步必须经过 planner → validate → safety check → execute → log |
-| 高风险动作失控 | 门锁解锁、摄像头关闭等必须进入 `confirmation_required` 状态 |
-| 多设备状态冲突 | 运行时检测冲突（窗开着开空调、安防开着解锁门），写入 conflicts 字段 |
-| 执行不可追溯 | 所有工具调用写入 `data/execution_log.json`（tool_name/args/result/status/timestamp）|
-| 模型强绑定 | 业务层只调用 `ModelRouter.call("planner", messages)`，不接触具体供应商 |
-| 模型输出不可靠 | Parser 支持普通 JSON、代码块包裹、双重转义、前后夹杂说明文字，解析失败则拒绝执行 |
-
----
-
-## 快速启动
-
-```bash
-# 1. 克隆项目
-git clone <repo-url>
-cd flowguard-agent
-
-# 2. 创建虚拟环境
-python -m venv .venv
-
-# Windows:
-.venv\Scripts\activate
-# macOS/Linux:
-source .venv/bin/activate
-
-# 3. 安装依赖
-pip install -r requirements.txt
-
-# 4. 配置环境变量（仅 model 模式需要）
-cp .env.example .env
-# 编辑 .env，填入 MODEL_API_KEY=your-api-key-here
-
-# 5. 启动服务（默认 mock 模式，无需 API Key）
-uvicorn backend.main:app --reload --port 8000
-
-# 6. 打开交互式文档
-# http://localhost:8000/docs
-
-# 7. 运行单元测试
-pytest tests/ -v
-```
-
----
-
-## 两种 Planner 模式
-
-| 模式 | 配置 | 说明 |
+| 版本 | 重点 | 状态 |
 |------|------|------|
-| **mock** | `"plannerMode": "mock"` | 默认。基于关键词匹配返回固定计划，无需 API Key |
-| **model** | `"plannerMode": "model"` | 调用真实 LLM 生成计划，需要 `.env` 中配置 `MODEL_API_KEY` |
-
-切换模式只需修改 `agent.config.json` 中 `runtime.plannerMode` 的值。
-
-**切换到 model 模式：**
-
-1. 在 `.env` 中填入 `MODEL_API_KEY=your-real-key`
-2. 在 `agent.config.json` 中修改供应商和模型：
-
-```json
-"providers": {
-  "openai_compatible": {
-    "baseUrl": "https://api.openai.com/v1",
-    "apiKeyEnvVar": "MODEL_API_KEY"
-  }
-},
-"models": {
-  "planner": {
-    "model": "gpt-4o"
-  }
-},
-"runtime": {
-  "plannerMode": "model"
-}
-```
-
-常用供应商：
-
-| 供应商 | baseUrl | model 示例 |
-|--------|---------|-----------|
-| OpenAI | `https://api.openai.com/v1` | `gpt-4o` |
-| DeepSeek | `https://api.deepseek.com/v1` | `deepseek-chat` |
-| SiliconFlow | `https://api.siliconflow.cn/v1` | `Qwen/Qwen2.5-72B-Instruct` |
-| OpenRouter | `https://openrouter.ai/api/v1` | `openai/gpt-4o` |
+| v0.1 | workflow-first 基础执行流：`/agent/run`、`/agent/confirm`、state/log 持久化、mock planner、高风险确认 | 已完成 |
+| v0.2 | model planner：接入 `ModelRouter`、OpenAI-compatible provider、planner JSON 解析和参数规范化 | 已完成 |
+| v0.3 | Multi-Agent Event Runtime：事件 schema、事件日志、EventBus、事件查询 API、Planner/Safety/Executor/Reporter/task 事件闭环 | 已完成 |
 
 ---
 
-## 项目结构
+## 核心理念
 
-```
-flowguard-agent/
-├── backend/
-│   ├── main.py              # FastAPI 应用入口
-│   ├── config_loader.py     # 加载 agent.config.json
-│   ├── agent_runtime.py     # 核心执行引擎（11步工作流）
-│   ├── model_router.py      # 模型角色路由（业务层唯一调用点）
-│   ├── providers/
-│   │   ├── base.py          # BaseProviderAdapter 抽象接口
-│   │   └── openai_compatible.py  # OpenAI-compatible 实现（懒加载 API Key）
-│   ├── tools/
-│   │   ├── file_tools.py    # file.read / file.write / file.list
-│   │   ├── device_tools.py  # device.get_state / device.set_state
-│   │   ├── rag_tools.py     # rag.search（关键词检索）
-│   │   └── web_tools.py     # web.search（mock）
-│   ├── state/
-│   │   ├── state_manager.py # 任务状态管理 → data/state.json
-│   │   └── log_manager.py   # 执行日志管理 → data/execution_log.json
-│   └── schemas/
-│       ├── plan_schema.py   # ExecutionPlan / PlanStep
-│       └── tool_schema.py   # ToolCallRecord
-├── tests/
-│   └── test_parse_plan_json.py  # Parser 和字段规范化单元测试
-├── workspace/
-│   ├── device_state.json    # 设备状态数据源
-│   └── test.md              # 测试文档
-├── data/
-│   ├── state.json           # 任务状态持久化
-│   └── execution_log.json   # 执行日志（append-only）
-├── docs/
-│   ├── testing-guide.md     # Swagger 测试操作手册
-│   └── demo-script.md       # 面试/作品集演示脚本
-├── agent.config.json        # 主配置文件
-├── .env.example             # 环境变量模板
-├── .gitignore
-├── requirements.txt
-└── README.md
-```
+FlowGuard Agent 的边界很明确：
+
+- 模型不能直接调用工具，只能输出 `ExecutionPlan`
+- Runtime 必须校验 plan schema 和 action 白名单
+- Runtime 必须独立检查高风险动作，不信任模型标记
+- 高风险动作必须等待用户确认
+- 工具结果必须写入执行日志
+- 最终 summary 不能在工具失败时声称任务完全完成
+- 所有关键阶段都通过事件流记录，方便 dashboard / pixel-office 可视化
 
 ---
 
-## API 接口
+## 逻辑 Agent 角色
+
+| 角色 | 说明 |
+|------|------|
+| System | 接收任务、发出任务终态事件 |
+| Planner | mock 或 model planner，生成结构化执行计划 |
+| Safety Reviewer | 检查 forbidden tools 和高风险设备状态 |
+| User Confirmation | 表示用户确认或取消高风险动作 |
+| Executor | 逐步执行工具，并发出 step started / completed 事件 |
+| Reporter | 根据执行结果生成最终 summary，并触发 task 终态事件 |
+
+---
+
+## v0.3 事件链
+
+完整事件流：
+
+```text
+task.received
+planner.started
+planner.completed | planner.failed
+safety.started
+safety.passed | safety.flagged
+confirmation.required
+confirmation.approved | confirmation.cancelled
+executor.step_started
+executor.step_completed
+reporter.started
+reporter.summary_created
+task.completed | task.completed_with_errors | task.failed | task.cancelled
+```
+
+事件字段统一由 `AgentEvent` 表示，核心字段包括：
+
+- `event_id`
+- `task_id`
+- `timestamp`
+- `agent`
+- `event_type`
+- `status`
+- `message`
+- `step_id`
+- `tool_name`
+- `payload`
+
+事件默认持久化到 `data/events.json`，但文档示例不会包含本地真实运行数据。
+
+---
+
+## API
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | `GET` | `/health` | 健康检查 |
-| `POST` | `/agent/run` | 提交任务（自然语言 → 计划 → 执行） |
-| `POST` | `/agent/confirm` | 确认或取消高风险动作 |
-| `GET` | `/agent/state` | 查看所有任务状态 |
-| `GET` | `/agent/logs` | 查看工具调用执行日志 |
+| `POST` | `/agent/run` | 提交自然语言任务，Runtime 生成/执行计划 |
+| `POST` | `/agent/confirm` | 确认或取消等待中的高风险任务 |
+| `GET` | `/agent/state` | 查看任务状态 |
+| `GET` | `/agent/logs` | 查看工具执行日志 |
+| `GET` | `/agent/events` | 查看全部事件 |
+| `GET` | `/agent/events/{task_id}` | 查看指定任务事件链 |
 
----
-
-## 验收用例
-
-### 用例 1：文件读取总结
+### 运行任务
 
 ```bash
 curl -X POST http://localhost:8000/agent/run \
@@ -168,17 +101,7 @@ curl -X POST http://localhost:8000/agent/run \
   -d '{"message": "读取 test.md"}'
 ```
 
-期望：`status: "completed"`，`file.read` 返回真实文件内容。
-
-### 用例 2：多设备任务编排（回家模式）
-
-```bash
-curl -X POST http://localhost:8000/agent/run \
-  -H "Content-Type: application/json" \
-  -d '{"message": "回家模式"}'
-```
-
-期望：`status: "confirmation_required"`，`pending_actions` 中有 door_lock unlock。
+### 确认高风险任务
 
 ```bash
 curl -X POST http://localhost:8000/agent/confirm \
@@ -186,105 +109,106 @@ curl -X POST http://localhost:8000/agent/confirm \
   -d '{"task_id": "<task_id>", "confirm": true}'
 ```
 
-期望：`status: "completed"`，5 步全部执行成功。
+### 查看事件
 
----
-
-## v0.1 验收结果
-
-以下接口测试均在 `plannerMode = "mock"` 模式下通过，无需 API Key。
-
-| 接口 | 测试场景 | 结果 |
-|------|----------|------|
-| `GET /health` | 服务在线检查 | 通过 |
-| `GET /agent/state` | 返回任务状态字典 | 通过 |
-| `GET /agent/logs` | 返回工具调用日志数组 | 通过 |
-| `POST /agent/run` | 文件读取总结 | 通过，`status: completed`，file.read 返回文件内容 |
-| `POST /agent/run` | 回家模式 | 通过，`status: confirmation_required`，door_lock 进入 pending_actions |
-| `POST /agent/confirm` | 确认执行 | 通过，5 步全部执行，door_lock → unlocked |
-| `POST /agent/confirm` | 拒绝执行 | 通过，`status: cancelled`，无动作执行 |
-
----
-
-## v0.2 验收结果
-
-### mock planner 回归
-
-v0.1 所有测试在 v0.2 代码上回归通过，mock planner 行为不变。
-
-### model planner（真实模型）
-
-| 测试场景 | 结果 | 说明 |
-|----------|------|------|
-| file.read 读取 test.md | 通过 | 真实模型生成 `file.read` 计划，Runtime 执行后返回 `completed` |
-| 回家模式（高风险拦截） | 通过 | 模型生成含 door_lock unlock 的计划，Runtime 独立拦截为 `confirmation_required` |
-| confirm 后继续执行 | 通过 | 确认后 5 步全部执行，`completed` |
-| state/logs 追踪 | 通过 | `GET /agent/state` 和 `GET /agent/logs` 均记录完整执行链路 |
-
-### Parser 鲁棒性
-
-| 输入格式 | 结果 |
-|----------|------|
-| 普通 JSON | 通过 |
-| ` ```json ... ``` ` 代码块包裹 | 通过 |
-| 双重转义 JSON 字符串 | 通过 |
-| JSON 前后夹杂说明文字 | 通过 |
-| 纯文本（无法解析） | 返回 `plan_parse_failed`，不执行任何工具 |
-
-### 安全规则
-
-- door_lock unlock 始终被 Runtime `_check_safety` 独立拦截为 `confirmation_required`，不依赖模型标记
-- 未知 action 名返回 `plan_validation_failed`
-- 解析失败返回 `plan_parse_failed`，绝不执行工具
-
-### 单元测试
-
-```
-tests/test_parse_plan_json.py — 7 passed
-```
-
-详细操作步骤见 [docs/testing-guide.md](docs/testing-guide.md)。
-演示脚本见 [docs/demo-script.md](docs/demo-script.md)。
-
----
-
-## 执行日志格式
-
-每条日志记录格式：
-
-```json
-{
-  "task_id": "abc12345",
-  "step_id": "step_1",
-  "tool_name": "device.get_state",
-  "args": {},
-  "result": {"status": "success", "devices": {"...": "..."}},
-  "status": "success",
-  "timestamp": "2026-04-25T10:30:00.123456+00:00"
-}
+```bash
+curl http://localhost:8000/agent/events
+curl http://localhost:8000/agent/events/<task_id>
 ```
 
 ---
 
-## 后续扩展方向
+## 快速启动
 
-### v0.3 — 检索与执行增强
-- [ ] RAG 升级为 embedding 向量检索
-- [ ] web.search 接入真实搜索 API
-- [ ] vision 模型角色 — 图像理解
-- [ ] 步骤重试机制（可配置次数）
+```bash
+cd flowguard-agent
+python -m venv .venv
 
-### v0.4 — 可观测性
-- [ ] 结构化日志（JSON Lines，支持 ELK / Loki）
-- [ ] Prometheus metrics 接口
-- [ ] WebSocket 实时推送执行进度
+# Windows
+.\.venv\Scripts\activate
 
-### v0.5 — 多 Agent
-- [ ] SubAgent 调度器
-- [ ] Agent 间通信协议
-- [ ] 共享状态锁
+pip install -r requirements.txt
+uvicorn backend.main:app --reload --port 8000
+```
 
-### v1.0 — 前端与部署
-- [ ] React 前端 — 任务提交、状态追踪、确认弹窗
-- [ ] Docker Compose 部署方案
-- [ ] 多用户认证（JWT）
+默认 `runtime.plannerMode = "mock"`，不需要 API Key。
+
+如需 model planner，请在 `.env` 中配置环境变量，并在 `agent.config.json` 中切换到 `"plannerMode": "model"`。不要把真实 API Key 写入文档、代码或 Git。
+
+---
+
+## Swagger 手动测试
+
+打开：
+
+```text
+http://localhost:8000/docs
+```
+
+建议顺序：
+
+1. `POST /agent/run`，body：`{"message": "读取 test.md"}`
+2. 查看返回 `status == "completed"`
+3. `GET /agent/events/{task_id}`，确认出现 planner / safety / executor / reporter / task.completed 事件
+4. `POST /agent/run`，body：`{"message": "回家模式"}`
+5. 查看返回 `status == "confirmation_required"`
+6. `GET /agent/events/{task_id}`，确认出现 `safety.flagged` 和 `confirmation.required`，但没有 executor/reporter 终态
+7. `POST /agent/confirm`，body：`{"task_id": "<task_id>", "confirm": true}`
+8. 确认出现 executor / reporter / `task.completed`
+9. 重新运行“回家模式”，再 `confirm=false`
+10. 确认出现 `confirmation.cancelled` 和 `task.cancelled`
+
+详细步骤见 [docs/testing-guide.md](docs/testing-guide.md)。
+
+---
+
+## 测试
+
+```bash
+.\.venv\Scripts\python.exe -m pytest tests/ -v
+```
+
+v0.3.0 稳定版本测试结果：
+
+```text
+53 passed
+```
+
+---
+
+## 项目结构
+
+```text
+flowguard-agent/
+├── backend/
+│   ├── main.py
+│   ├── agent_runtime.py
+│   ├── events/
+│   │   ├── event_schema.py
+│   │   ├── event_log.py
+│   │   └── event_bus.py
+│   ├── model_router.py
+│   ├── providers/
+│   ├── schemas/
+│   ├── state/
+│   └── tools/
+├── docs/
+│   ├── architecture.md
+│   ├── testing-guide.md
+│   └── visual-runtime-design.md
+├── tests/
+├── workspace/
+├── agent.config.json
+└── README.md
+```
+
+---
+
+## 后续路线
+
+| 版本 | 目标 |
+|------|------|
+| v0.4 | 最小 dashboard：任务列表、事件时间线、确认入口 |
+| v0.5 | 多 Agent 角色模块拆分：Planner / Reviewer / Executor / Reporter 从 Runtime 中逐步抽出 |
+| v0.6 | 像素办公室可视化：用事件驱动角色移动、状态变化和任务看板 |
+| v0.7 | 多模型 / 多工具权限：不同角色可配置不同模型和工具权限边界 |
